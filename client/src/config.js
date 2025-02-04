@@ -13,11 +13,14 @@ const getApiUrl = () => {
 
 // Socket.IO configuration
 const getSocketConfig = () => ({
-  withCredentials: false,
   transports: ['websocket', 'polling'],
+  reconnection: true,
   reconnectionAttempts: 5,
   reconnectionDelay: 1000,
-  timeout: 60000
+  reconnectionDelayMax: 5000,
+  timeout: 20000,
+  autoConnect: true,
+  path: '/socket.io/'
 });
 
 export const API_URL = getApiUrl();

@@ -92,58 +92,60 @@ const ViewerPage = () => {
     });
 
     socketRef.current.on('stream-available', async ({ streamerId }) => {
-      console.log('Stream is available, creating peer connection...');
+      console.log('Stream is available, streamerId:', streamerId);
       try {
         const pc = await setupPeerConnection();
         
         // Add ICE candidate handler
         pc.onicecandidate = (event) => {
           if (event.candidate) {
-            console.log('Sending ICE candidate to streamer');
+            console.log('Viewer sending ICE candidate to streamer');
             socketRef.current.emit('ice-candidate', {
               candidate: event.candidate,
               targetId: streamerId
             });
           }
         };
-        
-        // Add transceivers for audio and video
+
+        // Log negotiation needed events
+        pc.onnegotiationneeded = (event) => {
+          console.log('Negotiation needed event:', event);
+        };
+
+        // Add transceivers before creating offer
+        console.log('Adding transceivers...');
         pc.addTransceiver('video', { direction: 'recvonly' });
         pc.addTransceiver('audio', { direction: 'recvonly' });
         
-        // Create and send offer with proper configuration
+        console.log('Creating offer...');
         const offer = await pc.createOffer({
           offerToReceiveAudio: true,
           offerToReceiveVideo: true
         });
         
-        // Set local description with error handling
-        try {
-          await pc.setLocalDescription(offer);
-          console.log('Local description set successfully');
-          
-          // Only send the offer if setLocalDescription succeeded
-          console.log('Sending offer to streamer');
-          socketRef.current.emit('offer', {
-            offer: pc.localDescription,
-            streamerId
-          });
-        } catch (error) {
-          console.error('Error setting local description:', error);
-          throw error;
-        }
+        console.log('Setting local description...');
+        await pc.setLocalDescription(offer);
+        console.log('Local description set successfully');
+        
+        console.log('Sending offer to streamer:', streamerId);
+        socketRef.current.emit('offer', {
+          offer: pc.localDescription,
+          streamerId
+        });
       } catch (error) {
-        console.error('Error setting up stream:', error);
+        console.error('Error in stream-available handler:', error);
         setError('Failed to setup video stream. Please try reconnecting.');
       }
     });
 
     socketRef.current.on('answer', async ({ answer }) => {
-      console.log('Received answer from streamer');
+      console.log('Received answer from streamer:', answer);
       try {
         if (peerConnectionRef.current) {
           await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
           console.log('Set remote description successfully');
+        } else {
+          console.error('No peer connection available when receiving answer');
         }
       } catch (error) {
         console.error('Error setting remote description:', error);
@@ -175,18 +177,41 @@ const ViewerPage = () => {
     pc.ontrack = (event) => {
       console.log('Received track:', event.track.kind);
       if (videoRef.current && event.streams && event.streams[0]) {
-        videoRef.current.srcObject = event.streams[0];
-        console.log('Setting video source:', event.streams[0]);
-        
-        // Only try to play if the video element exists
-        if (videoRef.current.play) {
-          videoRef.current.play().catch(e => {
-            console.error('Error playing video:', e);
-            // Handle autoplay restrictions
-            if (e.name === 'NotAllowedError') {
-              setError('Autoplay blocked. Please click to play the video.');
+        // Store the stream ID to check if it's a new stream
+        const currentStreamId = videoRef.current.srcObject?.id;
+        const newStreamId = event.streams[0].id;
+
+        // Only set new stream if it's different from current
+        if (currentStreamId !== newStreamId) {
+          console.log('Setting new video source:', event.streams[0]);
+          videoRef.current.srcObject = event.streams[0];
+          
+          // Wait for loadedmetadata before attempting to play
+          videoRef.current.onloadedmetadata = () => {
+            console.log('Video metadata loaded, attempting to play');
+            const playPromise = videoRef.current.play();
+            
+            if (playPromise !== undefined) {
+              playPromise
+                .then(() => {
+                  console.log('Video playback started successfully');
+                })
+                .catch(e => {
+                  console.error('Error playing video:', e);
+                  if (e.name === 'NotAllowedError') {
+                    setError('Autoplay blocked. Please click to play the video.');
+                  } else if (e.name === 'AbortError') {
+                    console.log('Play request aborted, will retry when media is ready');
+                  }
+                });
             }
-          });
+          };
+
+          // Handle video errors
+          videoRef.current.onerror = (e) => {
+            console.error('Video element error:', e);
+            setError('Error loading video stream. Please try reconnecting.');
+          };
         }
       }
     };
@@ -278,12 +303,25 @@ const ViewerPage = () => {
         </div>
 
         {/* Video Container */}
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          className="w-full h-[calc(100vh-2rem)] object-contain rounded-lg bg-gray-800"
-        />
+        <div className="relative">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted={false}
+            controls
+            className="w-full h-[calc(100vh-2rem)] object-contain rounded-lg bg-gray-800"
+          />
+          {error && error.includes('Autoplay blocked') && (
+            <button
+              onClick={() => videoRef.current?.play()}
+              className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 
+                       bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg"
+            >
+              Click to Play Video
+            </button>
+          )}
+        </div>
 
         {/* Error Message and Reconnect Button */}
         {(connectionStatus === 'disconnected' || error) && (

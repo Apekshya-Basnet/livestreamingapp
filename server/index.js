@@ -12,14 +12,16 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: "*",
+        origin: ["http://localhost:5173", "http://localhost:3000"],
         methods: ["GET", "POST"],
         credentials: true,
-        transports: ['websocket', 'polling']
+        allowedHeaders: ["Content-Type", "Authorization"]
     },
+    transports: ['websocket', 'polling'],
     allowEIO3: true,
     pingTimeout: 60000,
-    pingInterval: 25000
+    pingInterval: 25000,
+    path: '/socket.io/'
 });
 
 // Add security middleware
@@ -42,19 +44,10 @@ const allowedOrigins = [
 ];
 
 const corsOptions = {
-  origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.indexOf(origin) !== -1 || origin.includes('.devtunnels.ms')) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET', 'POST'],
-  credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization']
+    origin: ["http://localhost:5173", "http://localhost:3000"],
+    methods: ['GET', 'POST'],
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization']
 };
 
 app.use(cors(corsOptions));
@@ -200,26 +193,30 @@ const startBotMessages = () => {
     }
 
     const sendBotMessage = () => {
-        const randomMessage = BOT_MESSAGES[Math.floor(Math.random() * BOT_MESSAGES.length)];
-        const botMessage = {
-            username: 'Bot',
-            message: randomMessage,
+        const botMessage = generateFakeComment();
+        const messageData = {
+            ...botMessage,
             timestamp: new Date().toISOString(),
-            id: Math.random().toString(36).substr(2, 9)
+            id: Math.random().toString(36).substr(2, 9),
+            isBot: true
         };
 
-        chatHistory.push(botMessage);
+        chatHistory.push(messageData);
         if (chatHistory.length > MAX_CHAT_HISTORY) {
             chatHistory.shift();
         }
 
-        io.emit('chat:message', botMessage);
+        io.emit('chat:message', messageData);
     };
 
-    // Send first message immediately
-    sendBotMessage();
-    // Then send messages every 30 seconds
-    botInterval = setInterval(sendBotMessage, 30000);
+    // Send first message after a short delay
+    setTimeout(sendBotMessage, 2000);
+    
+    // Then send messages randomly between MIN and MAX delay
+    botInterval = setInterval(() => {
+        const delay = Math.floor(Math.random() * (BOT_DELAY_MAX - BOT_DELAY_MIN) + BOT_DELAY_MIN);
+        setTimeout(sendBotMessage, delay);
+    }, BOT_DELAY_MAX);
 };
 
 io.on('connection', (socket) => {
@@ -229,12 +226,18 @@ io.on('connection', (socket) => {
         console.log('Admin started streaming:', socket.id);
         socket.join('admin-room');
         socket.to('viewer-room').emit('stream-available', { streamerId: socket.id });
+        
+        // Start bot messages when stream starts
+        if (!botInterval) {
+            startBotMessages();
+        }
     });
 
     socket.on('stream:end', () => {
         streamActive = false;
         if (botInterval) {
             clearInterval(botInterval);
+            botInterval = null;
         }
         socket.to('viewer-room').emit('stream-ended');
     });
@@ -264,7 +267,8 @@ io.on('connection', (socket) => {
     });
 
     socket.on('offer', ({ offer, streamerId }) => {
-        console.log('Relaying offer from viewer to streamer');
+        console.log('Server received offer from viewer:', socket.id);
+        console.log('Relaying offer to streamer:', streamerId);
         socket.to(streamerId).emit('offer', {
             offer,
             viewerId: socket.id
@@ -272,12 +276,13 @@ io.on('connection', (socket) => {
     });
 
     socket.on('answer', ({ answer, viewerId }) => {
-        console.log('Relaying answer from streamer to viewer');
+        console.log('Server received answer from streamer:', socket.id);
+        console.log('Relaying answer to viewer:', viewerId);
         socket.to(viewerId).emit('answer', { answer });
     });
 
     socket.on('ice-candidate', ({ candidate, targetId }) => {
-        console.log('Relaying ICE candidate');
+        console.log('Server relaying ICE candidate from:', socket.id, 'to:', targetId);
         socket.to(targetId).emit('ice-candidate', { candidate });
     });
 
@@ -327,7 +332,25 @@ process.on('SIGINT', () => {
     process.exit();
 });
 
+// Add error handling for the server
+server.on('error', (error) => {
+    console.error('Server error:', error);
+});
+
+io.on('connect_error', (error) => {
+    console.error('Socket connection error:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// Add a health check endpoint
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
+});
+
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://localhost:${PORT}`);
 });

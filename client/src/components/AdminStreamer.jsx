@@ -86,11 +86,34 @@ const AdminStreamer = () => {
     }
   };
 
-  const initializeSocket = () => {
-    socketRef.current = io(API_URL, SOCKET_CONFIG);
+  useEffect(() => {
+    if (!isAuthenticated) return; // Only connect if authenticated
+
+    console.log('Initializing socket connection...');
+    const socket = io(API_URL, {
+      ...SOCKET_CONFIG,
+      auth: { token: 'admin' }
+    });
+
+    socket.on('connect', () => {
+      console.log('Connected to server with ID:', socket.id);
+      if (streamRef.current) {
+        console.log('Emitting stream:start on connect...');
+        socket.emit('stream:start');
+      }
+    });
+
+    socket.on('connect_error', (error) => {
+      console.error('Socket connection error:', error);
+      setStreamError('Failed to connect to server. Please try again.');
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.log('Disconnected from server:', reason);
+    });
 
     // Handle chat messages
-    socketRef.current.on('chat:message', (msg) => {
+    socket.on('chat:message', (msg) => {
       setMessages(prev => {
         if (prev.some(m => m.id === msg.id)) return prev;
         return [...prev.slice(-99), msg];
@@ -98,15 +121,15 @@ const AdminStreamer = () => {
     });
 
     // Request chat history
-    socketRef.current.emit('chat:history');
-    socketRef.current.on('chat:history', (history) => {
+    socket.emit('chat:history');
+    socket.on('chat:history', (history) => {
       if (Array.isArray(history)) {
         setMessages(history);
       }
     });
 
     // Handle viewer offers
-    socketRef.current.on('offer', async ({ offer, viewerId }) => {
+    socket.on('offer', async ({ offer, viewerId }) => {
       try {
         let pc = peerConnectionsRef.current[viewerId];
         if (!pc) {
@@ -127,9 +150,9 @@ const AdminStreamer = () => {
 
           pc.onicecandidate = (event) => {
             if (event.candidate) {
-              socketRef.current.emit('ice-candidate', {
+              socket.emit('ice-candidate', {
                 candidate: event.candidate,
-                viewerId
+                targetId: viewerId
               });
             }
           };
@@ -143,14 +166,14 @@ const AdminStreamer = () => {
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
 
-        socketRef.current.emit('answer', { answer, viewerId });
+        socket.emit('answer', { answer, viewerId });
       } catch (error) {
         console.error('Error handling offer:', error);
       }
     });
 
     // Handle ICE candidates
-    socketRef.current.on('ice-candidate', async ({ candidate, viewerId }) => {
+    socket.on('ice-candidate', async ({ candidate, viewerId }) => {
       try {
         const pc = peerConnectionsRef.current[viewerId];
         if (pc) {
@@ -162,9 +185,65 @@ const AdminStreamer = () => {
     });
 
     // Handle viewer stats
-    socketRef.current.on('viewers:update', (stats) => {
+    socket.on('viewers:update', (stats) => {
       setViewerStats(stats);
     });
+
+    // Store socket reference
+    socketRef.current = socket;
+
+    // Cleanup function
+    return () => {
+      console.log('Cleaning up socket connection...');
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => {
+          console.log('Stopping track:', track.kind);
+          track.stop();
+        });
+        streamRef.current = null;
+      }
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+
+      Object.values(peerConnectionsRef.current).forEach(pc => {
+        pc.close();
+      });
+      peerConnectionsRef.current = {};
+      
+      if (socket) {
+        socket.removeAllListeners();
+        socket.disconnect();
+      }
+    };
+  }, [isAuthenticated]); // Only depend on isAuthenticated
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    if (username === 'admin' && password === '12345') {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true
+        });
+        
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(err => console.error('Error playing video:', err));
+        }
+        
+        setIsAuthenticated(true);
+        setIsVideoEnabled(true);
+        setIsAudioEnabled(true);
+      } catch (error) {
+        console.error('Error accessing media devices:', error);
+        setStreamError('Failed to access camera/microphone');
+      }
+    } else {
+      setStreamError('Invalid credentials');
+    }
   };
 
   const handleSendMessage = (message) => {
@@ -179,54 +258,6 @@ const AdminStreamer = () => {
 
     socketRef.current.emit('chat:message', messageData);
   };
-
-  const handleLogin = (e) => {
-    e.preventDefault();
-    if (username === 'admin' && password === '12345') {
-      setIsAuthenticated(true);
-      initializeStream();
-    } else {
-      setStreamError('Invalid credentials');
-    }
-  };
-
-  const initializeStream = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
-      
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().catch(err => console.error('Error playing video:', err));
-      }
-      
-      initializeSocket();
-    } catch (error) {
-      console.error('Error accessing media devices:', error);
-      setStreamError('Failed to access camera/microphone');
-    }
-  };
-
-  useEffect(() => {
-    const isAuth = localStorage.getItem('isAdminAuthenticated') === 'true';
-    if (isAuth) {
-      setIsAuthenticated(true);
-      initializeSocket();
-    }
-
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-      }
-      Object.values(peerConnectionsRef.current).forEach(pc => pc.close());
-    };
-  }, []);
 
   if (!isAuthenticated) {
     return (
